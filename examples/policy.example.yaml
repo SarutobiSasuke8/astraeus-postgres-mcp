@@ -1,0 +1,54 @@
+# Astraeus Governed Postgres MCP: example policy (default deny).
+# Names must match the real Postgres catalogue names (lower case unless quoted at creation).
+version: 1
+
+# Name of the environment variable that holds the connection string.
+# The value is read from the environment only. Never put it in this file.
+connection_env: DATABASE_URL
+
+# v0 is read-only. This must be true.
+readonly: true
+
+defaults:
+  max_rows: 100              # hard cap on rows returned per query
+  statement_timeout_ms: 5000 # applied per query inside a READ ONLY transaction
+  limit_mode: clamp          # clamp: lower an over-large LIMIT to max_rows. refuse: reject it.
+  require_limit: false       # true: queries with no LIMIT are rejected instead of capped
+
+allow:
+  schemas: [public]
+  tables:
+    - name: customers
+      # Only these columns can be selected, filtered or sorted. "email" is absent, so it is denied.
+      columns: [id, name, created_at, billing_phone]
+      # ANDed into every query on this table. The DB role needs SELECT on deleted_at too.
+      require_predicate: "deleted_at IS NULL"
+    - name: orders
+      columns: [id, customer_id, total_cents, status, created_at]
+      max_rows: 50           # optional per-table cap
+
+pii_mask:
+  # Applied to any output column that is, or is built from, a column whose name matches.
+  # Masked columns also cannot be used in WHERE, GROUP BY, HAVING or ORDER BY.
+  patterns:
+    - column_regex: "(?i)email|phone|iban"
+      strategy: redact       # redact | null | hash (hash is unsalted, so weak for low-entropy values)
+
+# Documentation of what the guard refuses. The guard enforces these unconditionally.
+deny_sql:
+  - multi_statement
+  - copy
+  - set_role
+  - create
+  - alter
+  - drop
+  - insert
+  - update
+  - delete
+  - truncate
+  - grant
+  - revoke
+
+# Optional. The ASTRAEUS_AUDIT_PATH environment variable overrides this.
+audit:
+  path: ./astraeus-audit.jsonl

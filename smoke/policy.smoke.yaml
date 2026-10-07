@@ -1,0 +1,19 @@
+# Policy used by `npm run smoke`. Small row cap so the clamp is easy to see.
+version: 1
+connection_env: DATABASE_URL
+readonly: true
+defaults:
+  max_rows: 5
+  statement_timeout_ms: 5000
+allow:
+  schemas: [public]
+  tables:
+    - name: customers
+      columns: [id, name, created_at, billing_phone]
+      require_predicate: "deleted_at IS NULL"
+    - name: orders
+      columns: [id, customer_id, total_cents, status]
+pii_mask:
+  patterns:
+    - column_regex: "(?i)email|phone|iban"
+      strategy: redact
