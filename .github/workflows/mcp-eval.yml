@@ -1,0 +1,26 @@
+name: mcp-eval
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The suite target (scripts/eval-target.mjs) starts a throwaway embedded PostgreSQL
+      # from npm, so no database service or secrets are needed.
+      - uses: SarutobiSasuke8/mcp-eval-harness@077c74a60ccd6d9061e35f882ffd3db5f5d17052
+        with:
+          suite: eval/mcp.suite.yaml
+          node-version: ""

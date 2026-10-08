@@ -1,0 +1,136 @@
+# mcp-eval contract suite for astraeus-postgres-mcp. Run with `npm run eval:contract`.
+#
+# The target is scripts/eval-target.mjs: it starts a throwaway embedded PostgreSQL from npm
+# (no Docker, no network), seeds it from smoke/seed.sql with random throwaway passwords, and
+# runs dist/index.js over stdio with smoke/policy.smoke.yaml. No secrets are needed.
+# Goldens avoid timestamp columns (they depend on the server time zone) and the policy hash
+# (it depends on line endings in the checkout).
+version: 1
+name: astraeus-postgres-mcp
+target:
+  transport: stdio
+  command: ["node", "../scripts/eval-target.mjs"]
+# initdb on a cold Windows machine can take close to a minute; this also bounds each call.
+timeout_ms: 180000
+contracts:
+  # Listing: a new or missing tool fails the suite.
+  - name: tools_listed
+    expect_tools: [list_tables, describe_table, query, run_view, policy_info, ping]
+    exact: true
+
+  # Advertised input schemas for every tool.
+  - name: input_schemas
+    input_schema:
+      list_tables: fixtures/list_tables.input.schema.json
+      describe_table: fixtures/describe_table.input.schema.json
+      query: fixtures/query.input.schema.json
+      run_view: fixtures/run_view.input.schema.json
+      policy_info: fixtures/policy_info.input.schema.json
+      ping: fixtures/ping.input.schema.json
+
+  # Happy paths against the seeded example data.
+  - name: ping_ok
+    tool: ping
+    input: {}
+    assert:
+      golden:
+        path: fixtures/ping.golden.json
+        only_paths: [status]
+
+  - name: list_tables_golden
+    tool: list_tables
+    input: {}
+    assert:
+      golden: fixtures/list_tables.golden.json
+
+  - name: policy_info_golden
+    tool: policy_info
+    input: {}
+    assert:
+      golden:
+        path: fixtures/policy_info.golden.json
+        ignore_paths: [policy_hash]
+
+  - name: describe_table_hides_unlisted_columns
+    tool: describe_table
+    input: { table: customers }
+    assert:
+      golden: fixtures/describe_customers.golden.json
+
+  - name: join_masks_phone_and_applies_predicate_and_rls
+    tool: query
+    input:
+      sql: "select c.name, c.billing_phone as contact, o.total_cents, o.status from customers c join orders o on o.customer_id = c.id order by o.id"
+    assert:
+      golden: fixtures/query_join.golden.json
+
+  - name: run_view_revenue_by_status
+    tool: run_view
+    input: { name: revenue_by_status, params: { since: "2026-09-01" } }
+    assert:
+      golden: fixtures/run_view_revenue.golden.json
+
+  # Deny and fail-closed paths.
+  - name: deny_column_not_allowed
+    tool: query
+    input: { sql: "select email from customers" }
+    assert:
+      is_error: true
+      error_message: '"error":"column_not_allowed"'
+
+  - name: deny_multi_statement
+    tool: query
+    input: { sql: "select 1; select 2" }
+    assert:
+      is_error: true
+      error_message: '"error":"multi_statement"'
+
+  - name: deny_non_read_statement
+    tool: query
+    input: { sql: "delete from customers" }
+    assert:
+      is_error: true
+      error_message: '"error":"non_read_statement"'
+
+  - name: deny_table_not_allowed
+    tool: query
+    input: { sql: "select * from secrets" }
+    assert:
+      is_error: true
+      error_message: '"error":"table_not_allowed"'
+
+  - name: deny_cross_schema_join
+    tool: query
+    input: { sql: "select c.id from customers c join internal.staff_notes n on n.customer_id = c.id" }
+    assert:
+      is_error: true
+      error_message: '"error":"cross_schema_join"'
+
+  - name: deny_describe_unlisted_table
+    tool: describe_table
+    input: { table: secrets }
+    assert:
+      is_error: true
+      error_message: '"error":"table_not_allowed"'
+
+  - name: deny_view_mistyped_param
+    tool: run_view
+    input: { name: customer_orders, params: { customer_id: "1; drop table orders" } }
+    assert:
+      is_error: true
+      error_message: '"error":"invalid_params"'
+
+  - name: deny_unknown_view
+    tool: run_view
+    input: { name: not_a_view }
+    assert:
+      is_error: true
+      error_message: '"error":"view_not_found"'
+
+  # SDK 1.x reports an unregistered tool as an isError result, not a JSON-RPC error.
+  - name: unknown_tool
+    tool: not_a_tool
+    input: {}
+    assert:
+      is_error: true
+      error_message: "Tool not_a_tool not found"

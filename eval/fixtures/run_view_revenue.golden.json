@@ -1,0 +1,32 @@
+{
+  "columns": [
+    "status",
+    "orders",
+    "total_cents"
+  ],
+  "masked_columns": [],
+  "may_have_more": false,
+  "row_count": 3,
+  "row_limit": 20,
+  "rows": [
+    {
+      "orders": "2",
+      "status": "open",
+      "total_cents": "3190"
+    },
+    {
+      "orders": "4",
+      "status": "paid",
+      "total_cents": "27300"
+    },
+    {
+      "orders": "1",
+      "status": "refunded",
+      "total_cents": "450"
+    }
+  ],
+  "tables": [
+    "public.orders"
+  ],
+  "view": "revenue_by_status"
+}
