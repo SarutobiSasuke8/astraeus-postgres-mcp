@@ -13,8 +13,8 @@ export interface ColumnInfo {
 
 /** The only surface the server uses to reach Postgres. Tests replace it with a mock. */
 export interface Db {
-  /** Run one SELECT inside a READ ONLY transaction with a statement timeout. */
-  runReadOnly(sql: string, timeoutMs: number): Promise<QueryResult>;
+  /** Run one SELECT inside a READ ONLY transaction with a statement timeout. `params` bind $1..$n. */
+  runReadOnly(sql: string, timeoutMs: number, params?: unknown[]): Promise<QueryResult>;
   columnsOf(schema: string, table: string): Promise<ColumnInfo[]>;
   ping(): Promise<void>;
   close(): Promise<void>;
@@ -35,7 +35,7 @@ export class PgDb implements Db {
     this.pool.on("error", () => undefined);
   }
 
-  async runReadOnly(sql: string, timeoutMs: number): Promise<QueryResult> {
+  async runReadOnly(sql: string, timeoutMs: number, params: unknown[] = []): Promise<QueryResult> {
     const timeout = Math.floor(timeoutMs);
     if (!Number.isInteger(timeout) || timeout <= 0) throw new Error("invalid statement timeout");
     const client = await this.pool.connect();
@@ -43,7 +43,7 @@ export class PgDb implements Db {
       await client.query("BEGIN READ ONLY");
       await client.query(`SET LOCAL statement_timeout = ${timeout}`);
       // rowMode "array" also forces the extended protocol, which rejects multiple statements.
-      const res = await client.query({ text: sql, rowMode: "array" });
+      const res = await client.query({ text: sql, values: params, rowMode: "array" });
       return { fields: res.fields.map((f) => f.name), rows: res.rows as unknown[][] };
     } finally {
       try {

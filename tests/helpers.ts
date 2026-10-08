@@ -33,14 +33,14 @@ export function testPolicy(yaml: string = POLICY_YAML): Policy {
 }
 
 export class MockDb implements Db {
-  readonly executed: { sql: string; timeoutMs: number }[] = [];
+  readonly executed: { sql: string; timeoutMs: number; params: unknown[] | undefined }[] = [];
   result: QueryResult = { fields: [], rows: [] };
   columns: ColumnInfo[] = [];
   failWith: Error | undefined;
   pingFails = false;
 
-  runReadOnly(sql: string, timeoutMs: number): Promise<QueryResult> {
-    this.executed.push({ sql, timeoutMs });
+  runReadOnly(sql: string, timeoutMs: number, params?: unknown[]): Promise<QueryResult> {
+    this.executed.push({ sql, timeoutMs, params });
     if (this.failWith) return Promise.reject(this.failWith);
     return Promise.resolve(this.result);
   }

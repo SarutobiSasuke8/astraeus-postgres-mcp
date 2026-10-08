@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parsePolicy, PolicyError } from "../src/policy.js";
+import { loadPolicy, parsePolicy, PolicyError } from "../src/policy.js";
 import { buildRuntime, StartupError } from "../src/startup.js";
 import { MockDb, POLICY_YAML, tempDir } from "./helpers.js";
 
@@ -93,5 +93,14 @@ describe("policy loading", () => {
     const a = parsePolicy(json, "json");
     expect(a.hash).toBe(parsePolicy(json, "json").hash);
     expect(a.maxRows).toBe(100);
+  });
+});
+
+describe("shipped policies", () => {
+  it("the example and smoke policies load, including their named views", () => {
+    for (const file of ["examples/policy.example.yaml", "smoke/policy.smoke.yaml"]) {
+      const p = loadPolicy(file);
+      expect(p.views.length, file).toBeGreaterThan(0);
+    }
   });
 });

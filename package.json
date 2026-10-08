@@ -1,6 +1,6 @@
 {
   "name": "astraeus-postgres-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Governed, read-only Postgres MCP server with policy allowlists, row limits, PII masking and an audit log.",
   "main": "dist/index.js",
   "scripts": {
@@ -10,7 +10,9 @@
     "test": "vitest run",
     "check": "npm run lint && npm run typecheck && npm test",
     "start": "node dist/index.js",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "start:http": "node dist/http-main.js"
   },
   "keywords": [
     "mcp",
@@ -33,13 +35,15 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
+    "embedded-postgres": "^18.4.0-beta.17",
     "eslint": "^10.12.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.1",
     "vitest": "^5.0.3"
   },
   "bin": {
-    "astraeus-postgres-mcp": "dist/index.js"
+    "astraeus-postgres-mcp": "dist/index.js",
+    "astraeus-postgres-mcp-http": "dist/http-main.js"
   },
   "files": [
     "dist",

@@ -17,7 +17,10 @@ export class GuardError extends Error {
 export interface GuardResult {
   /** SQL regenerated from the validated syntax tree. This, not the caller's text, is what runs. */
   sql: string;
+  /** The first (or only) table in FROM. */
   table: CompiledTable;
+  /** Every table the query reads, in FROM order. */
+  tables: CompiledTable[];
   /** Output column names, in order. */
   columns: string[];
   /** Output column index to mask strategy. */
@@ -26,6 +29,24 @@ export interface GuardResult {
   limit: number;
   /** True when the caller asked for more than the cap, or gave no limit. */
   limitClamped: boolean;
+  /** Number of positional parameters ($1..$n). Always 0 outside named views. */
+  paramCount: number;
+}
+
+/** Parameter types a named view may declare, mapped to the Postgres cast applied to the placeholder. */
+export const PARAM_CASTS = {
+  text: "text",
+  integer: "bigint",
+  numeric: "numeric",
+  boolean: "boolean",
+  date: "date",
+  timestamp: "timestamptz",
+} as const;
+export type ParamType = keyof typeof PARAM_CASTS;
+
+export interface GuardOptions {
+  /** Named-view mode: allow $1..$n placeholders, each cast to the declared type. */
+  paramTypes?: ParamType[];
 }
 
 const MAX_SQL_LENGTH = 20_000;
@@ -50,6 +71,9 @@ const ALLOWED_KEYWORDS = new Set([
   "current_date", "current_time", "current_timestamp", "localtime", "localtimestamp",
 ]);
 
+/** Join types that may be used. CROSS JOIN, comma joins, NATURAL, USING and LATERAL are refused. */
+const ALLOWED_JOINS = new Set(["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"]);
+
 const NODE_KEYS: Record<string, string[]> = {
   ref: ["type", "name", "table"],
   string: ["type", "value"],
@@ -69,18 +93,32 @@ const NODE_KEYS: Record<string, string[]> = {
   extract: ["type", "field", "from"],
   member: ["type", "operand", "op", "member"],
   substring: ["type", "value", "from", "for"],
+  parameter: ["type", "name"],
 };
 
 const STATEMENT_KEYS = new Set([
   "type", "columns", "from", "where", "groupBy", "having", "orderBy", "limit", "distinct",
 ]);
 
-interface WalkCtx {
-  table: CompiledTable | undefined;
+/** One table in FROM, with the name it is referred to by (its alias, or its table name). */
+interface Source {
+  table: CompiledTable;
   alias: string | undefined;
+  refName: string;
+  node: ExprNode;
+  /** Allowlisted columns of this table that the query touches. */
+  used: Set<string>;
+}
+
+interface WalkCtx {
+  sources: Source[];
   /** Trusted mode is used for policy predicates: any column name is allowed. */
   trusted: boolean;
+  /** Join mode: every column reference is rewritten with its table qualifier. */
+  qualify: boolean;
   refs: string[];
+  paramTypes: ParamType[] | undefined;
+  paramsSeen: Set<number>;
 }
 
 function isNode(v: unknown): v is ExprNode {
@@ -106,6 +144,45 @@ function walkOptional(node: unknown, ctx: WalkCtx): void {
   if (node !== undefined && node !== null) walk(node, ctx);
 }
 
+function label(t: CompiledTable): string {
+  return `${t.schema}.${t.name}`;
+}
+
+/** Find the FROM source a column reference belongs to, or throw. */
+function resolveRef(name: string, qualifier: { name?: string; schema?: string } | undefined, ctx: WalkCtx): Source {
+  const { sources } = ctx;
+  if (qualifier !== undefined) {
+    const hit = qualifier.schema === undefined ? sources.find((s) => s.refName === qualifier.name) : undefined;
+    if (!hit) {
+      throw new GuardError(
+        "invalid_qualifier",
+        sources.length === 1
+          ? "column qualifier must be the queried table or its alias"
+          : "column qualifier must be one of the joined tables' aliases",
+      );
+    }
+    if (!hit.table.columnSet.has(name)) {
+      throw new GuardError("column_not_allowed", `column "${name}" is not allowed on ${label(hit.table)}`);
+    }
+    return hit;
+  }
+  if (sources.length === 1) {
+    const only = sources[0] as Source;
+    if (!only.table.columnSet.has(name)) {
+      throw new GuardError("column_not_allowed", `column "${name}" is not allowed on ${label(only.table)}`);
+    }
+    return only;
+  }
+  const matches = sources.filter((s) => s.table.columnSet.has(name));
+  if (matches.length === 0) {
+    throw new GuardError("column_not_allowed", `column "${name}" is not allowed on any table in this query`);
+  }
+  if (matches.length > 1) {
+    throw new GuardError("ambiguous_column", `column "${name}" is allowed on more than one joined table: qualify it with an alias`);
+  }
+  return matches[0] as Source;
+}
+
 function walk(node: unknown, ctx: WalkCtx): void {
   if (!isNode(node) || typeof node.type !== "string") {
     throw new GuardError("unsupported_syntax", "unsupported expression (subqueries are not allowed)");
@@ -121,21 +198,35 @@ function walk(node: unknown, ctx: WalkCtx): void {
       if (typeof name !== "string" || name === "*") {
         throw new GuardError("unsupported_syntax", "'*' is only allowed as a select item or inside count(*)");
       }
-      const qualifier = node.table;
-      if (qualifier !== undefined) {
-        const q = qualifier as { name?: string; schema?: string };
-        const expected = ctx.alias ?? ctx.table?.name;
-        if (ctx.trusted || q.schema !== undefined || q.name !== expected) {
-          throw new GuardError("invalid_qualifier", "column qualifier must be the queried table or its alias");
+      const qualifier = node.table as { name?: string; schema?: string } | undefined;
+      if (ctx.trusted) {
+        if (qualifier !== undefined) {
+          throw new GuardError("invalid_qualifier", "policy predicates must use unqualified column names");
         }
+        ctx.refs.push(name);
+        return;
       }
-      if (!ctx.trusted && ctx.table && !ctx.table.columnSet.has(name)) {
-        throw new GuardError(
-          "column_not_allowed",
-          `column "${name}" is not allowed on ${ctx.table.schema}.${ctx.table.name}`,
-        );
-      }
+      const source = resolveRef(name, qualifier, ctx);
+      source.used.add(name);
+      if (ctx.qualify) node.table = { name: source.refName };
       ctx.refs.push(name);
+      return;
+    }
+    case "parameter": {
+      const match = /^\$([1-9][0-9]{0,2})$/.exec(String(node.name));
+      if (!ctx.paramTypes) {
+        throw new GuardError("unsupported_syntax", "parameters are only allowed in named views defined in the policy");
+      }
+      const index = match ? Number(match[1]) : NaN;
+      const type = ctx.paramTypes[index - 1];
+      if (!type) {
+        throw new GuardError("unsupported_syntax", `parameter ${String(node.name)} is not declared`);
+      }
+      ctx.paramsSeen.add(index);
+      // Cast every placeholder to its declared type, so Postgres never has to guess.
+      const placeholder = { type: "parameter", name: node.name };
+      delete node.name;
+      Object.assign(node, { type: "cast", operand: placeholder, to: { name: PARAM_CASTS[type] } });
       return;
     }
     case "keyword":
@@ -230,7 +321,14 @@ export function compilePredicate(source: string): ExprNode {
       throw new GuardError("policy_predicate", `require_predicate must be a single expression: ${source}`);
     }
   }
-  const ctx: WalkCtx = { table: undefined, alias: undefined, trusted: true, refs: [] };
+  const ctx: WalkCtx = {
+    sources: [],
+    trusted: true,
+    qualify: false,
+    refs: [],
+    paramTypes: undefined,
+    paramsSeen: new Set(),
+  };
   walk(stmt.where, ctx);
   return stmt.where as ExprNode;
 }
@@ -240,35 +338,7 @@ function firstWord(sql: string): string {
   return (stripped.match(/^[A-Za-z_]+/)?.[0] ?? "").toLowerCase();
 }
 
-function resolveTable(
-  from: unknown,
-  policy: Policy,
-): { table: CompiledTable; alias: string | undefined; node: ExprNode } {
-  if (!Array.isArray(from) || from.length === 0) {
-    throw new GuardError("from_required", "a FROM clause with one allowed table is required");
-  }
-  if (from.length > 1) {
-    throw new GuardError("join_not_supported", "v0 supports single-table SELECT only (no joins or multiple tables)");
-  }
-  const f = from[0] as ExprNode;
-  if (f.type !== "table") {
-    throw new GuardError("subquery_not_supported", "v0 supports a plain table in FROM only (no subqueries or functions)");
-  }
-  if ("join" in f) {
-    throw new GuardError("join_not_supported", "v0 supports single-table SELECT only (no joins)");
-  }
-  const name = f.name as { name?: string; schema?: string; alias?: string; columnNames?: unknown } | undefined;
-  if (!name?.name || name.columnNames !== undefined) {
-    throw new GuardError("unsupported_syntax", "unsupported table reference");
-  }
-  for (const key of Object.keys(f)) {
-    if (!["type", "name"].includes(key)) throw new GuardError("unsupported_syntax", `unsupported FROM option: ${key}`);
-  }
-  for (const key of Object.keys(name)) {
-    if (!["name", "schema", "alias"].includes(key)) {
-      throw new GuardError("unsupported_syntax", `unsupported table option: ${key}`);
-    }
-  }
+function lookupTable(policy: Policy, name: { name: string; schema?: string }): CompiledTable {
   const candidates = policy.tables.filter((t) => t.name === name.name);
   let table: CompiledTable | undefined;
   if (name.schema !== undefined) {
@@ -284,7 +354,66 @@ function resolveTable(
     const shown = name.schema ? `${name.schema}.${name.name}` : name.name;
     throw new GuardError("table_not_allowed", `table "${shown}" is not in the policy`);
   }
-  return { table, alias: name.alias, node: f };
+  return table;
+}
+
+function resolveFrom(from: unknown, policy: Policy): Source[] {
+  if (!Array.isArray(from) || from.length === 0) {
+    throw new GuardError("from_required", "a FROM clause with at least one allowed table is required");
+  }
+  if (from.length > policy.maxJoinTables) {
+    throw new GuardError(
+      "join_not_supported",
+      policy.maxJoinTables === 1
+        ? "joins are disabled by this policy (max_join_tables: 1)"
+        : `at most ${policy.maxJoinTables} tables may be joined in one query`,
+    );
+  }
+  const sources: Source[] = [];
+  from.forEach((raw, i) => {
+    const f = raw as ExprNode;
+    if (f.type !== "table") {
+      throw new GuardError("subquery_not_supported", "only plain allowlisted tables are allowed in FROM (no subqueries or functions)");
+    }
+    for (const key of Object.keys(f)) {
+      if (!["type", "name", "join"].includes(key)) throw new GuardError("unsupported_syntax", `unsupported FROM option: ${key}`);
+    }
+    const join = f.join as { type?: string; on?: unknown; using?: unknown } | undefined;
+    if (i > 0 && join === undefined) {
+      throw new GuardError("join_not_supported", "comma joins are not supported: use JOIN ... ON");
+    }
+    if (join !== undefined) {
+      for (const key of Object.keys(join)) {
+        if (!["type", "on"].includes(key)) {
+          throw new GuardError("join_not_supported", "JOIN ... USING is not supported: use JOIN ... ON");
+        }
+      }
+      if (!ALLOWED_JOINS.has(String(join.type))) {
+        throw new GuardError("join_not_supported", `${String(join.type)} is not supported: use INNER, LEFT, RIGHT or FULL JOIN ... ON`);
+      }
+      if (join.on === undefined) throw new GuardError("join_not_supported", "a join needs an ON condition");
+    }
+    const name = f.name as { name?: string; schema?: string; alias?: string; columnNames?: unknown } | undefined;
+    if (!name?.name || name.columnNames !== undefined) {
+      throw new GuardError("unsupported_syntax", "unsupported table reference");
+    }
+    for (const key of Object.keys(name)) {
+      if (!["name", "schema", "alias"].includes(key)) {
+        throw new GuardError("unsupported_syntax", `unsupported table option: ${key}`);
+      }
+    }
+    const table = lookupTable(policy, { name: name.name, ...(name.schema !== undefined ? { schema: name.schema } : {}) });
+    const refName = name.alias ?? table.name;
+    if (sources.some((s) => s.refName === refName)) {
+      throw new GuardError("duplicate_alias", `"${refName}" is used twice in FROM: give each table its own alias`);
+    }
+    sources.push({ table, alias: name.alias, refName, node: f, used: new Set() });
+  });
+  const schemas = new Set(sources.map((s) => s.table.schema));
+  if (schemas.size > 1) {
+    throw new GuardError("cross_schema_join", `joins across schemas are not allowed (${[...schemas].join(", ")})`);
+  }
+  return sources;
 }
 
 function maskFor(policy: Policy, names: string[]): MaskStrategy | undefined {
@@ -301,7 +430,30 @@ function outputName(expr: ExprNode, alias: string | undefined): string {
   return "?column?";
 }
 
-export function guardQuery(sql: string, policy: Policy): GuardResult {
+/**
+ * The FROM item a source becomes after rewriting. In join mode a table with a
+ * require_predicate is replaced by a derived table that already has the predicate
+ * applied and exposes only the allowlisted columns the query uses. That keeps the
+ * predicate bound to its own table under every join type, including outer joins.
+ */
+function rewriteSource(s: Source, joinMode: boolean): ExprNode {
+  const join = s.node.join as ExprNode | undefined;
+  const withJoin = (item: ExprNode): ExprNode => (join ? { ...item, join } : item);
+  if (!joinMode || !s.table.requirePredicate) {
+    const name: ExprNode = { name: s.table.name, schema: s.table.schema };
+    if (s.alias !== undefined) name.alias = s.alias;
+    return withJoin({ type: "table", name });
+  }
+  const inner: ExprNode = {
+    type: "select",
+    columns: s.table.columns.filter((c) => s.used.has(c)).map((c) => ({ expr: { type: "ref", name: c } })),
+    from: [{ type: "table", name: { name: s.table.name, schema: s.table.schema } }],
+    where: structuredClone(s.table.requirePredicate),
+  };
+  return withJoin({ type: "statement", statement: inner, alias: s.refName });
+}
+
+export function guardQuery(sql: string, policy: Policy, opts: GuardOptions = {}): GuardResult {
   if (typeof sql !== "string" || sql.trim() === "") throw new GuardError("empty", "SQL is empty");
   if (sql.length > MAX_SQL_LENGTH) throw new GuardError("too_long", `SQL is longer than ${MAX_SQL_LENGTH} characters`);
 
@@ -313,7 +465,7 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     if (word && word !== "select" && word !== "with") {
       throw new GuardError("non_read_statement", `only SELECT is allowed (found ${word.toUpperCase()})`);
     }
-    throw new GuardError("parse_error", "SQL could not be parsed as a supported single-table SELECT");
+    throw new GuardError("parse_error", "SQL could not be parsed as a supported SELECT");
   }
   if (stmts.length === 0) throw new GuardError("empty", "SQL is empty");
   if (stmts.length > 1) throw new GuardError("multi_statement", "exactly one statement is allowed");
@@ -321,10 +473,10 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
   const stmt = stmts[0] as unknown as ExprNode;
   const stype = String(stmt.type);
   if (stype === "with" || stype === "with recursive") {
-    throw new GuardError("cte_not_supported", "WITH queries are not supported in v0");
+    throw new GuardError("cte_not_supported", "WITH queries are not supported");
   }
   if (stype === "union" || stype === "union all") {
-    throw new GuardError("set_operation_not_supported", "UNION is not supported in v0");
+    throw new GuardError("set_operation_not_supported", "UNION is not supported");
   }
   if (stype !== "select") {
     throw new GuardError("non_read_statement", `only SELECT is allowed (found ${stype.toUpperCase()})`);
@@ -338,8 +490,17 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     throw new GuardError("unsupported_syntax", "DISTINCT ON is not supported");
   }
 
-  const { table, alias, node: fromNode } = resolveTable(stmt.from, policy);
-  const ctx: WalkCtx = { table, alias, trusted: false, refs: [] };
+  const sources = resolveFrom(stmt.from, policy);
+  const joinMode = sources.length > 1;
+  const ctx: WalkCtx = {
+    sources,
+    trusted: false,
+    qualify: joinMode,
+    refs: [],
+    paramTypes: opts.paramTypes,
+    paramsSeen: new Set(),
+  };
+  const anyAllows = (name: string): boolean => sources.some((s) => s.table.columnSet.has(name));
 
   // Select list: expand '*' to the allowed columns, validate everything else.
   const rawCols = stmt.columns;
@@ -359,15 +520,23 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     const aliasName = (c.alias as { name?: string } | undefined)?.name;
     if (isNode(expr) && expr.type === "ref" && expr.name === "*") {
       const q = expr.table as { name?: string; schema?: string } | undefined;
-      if (aliasName || (q && (q.schema !== undefined || q.name !== (alias ?? table.name)))) {
-        throw new GuardError("invalid_qualifier", "invalid use of '*'");
+      let expand: Source[] = sources;
+      if (q !== undefined) {
+        const hit = q.schema === undefined ? sources.find((s) => s.refName === q.name) : undefined;
+        if (!hit) throw new GuardError("invalid_qualifier", "invalid use of '*'");
+        expand = [hit];
       }
-      for (const col of table.columns) {
-        const idx = outCols.length;
-        outCols.push({ expr: { type: "ref", name: col } });
-        outNames.push(col);
-        const strategy = maskFor(policy, [col]);
-        if (strategy) masked.set(idx, strategy);
+      if (aliasName) throw new GuardError("invalid_qualifier", "invalid use of '*'");
+      for (const s of expand) {
+        for (const col of s.table.columns) {
+          const idx = outCols.length;
+          const ref: ExprNode = joinMode ? { type: "ref", name: col, table: { name: s.refName } } : { type: "ref", name: col };
+          s.used.add(col);
+          outCols.push({ expr: ref });
+          outNames.push(col);
+          const strategy = maskFor(policy, [col]);
+          if (strategy) masked.set(idx, strategy);
+        }
       }
       continue;
     }
@@ -380,14 +549,15 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     if (strategy) masked.set(idx, strategy);
   }
 
-  // Filtering and ordering clauses. Masked columns may not be used here, otherwise
-  // a caller could recover masked values by probing with predicates or sort order.
+  // Filtering, joining and ordering clauses. Masked columns may not be used here,
+  // otherwise a caller could recover masked values by probing with predicates,
+  // join conditions or sort order.
   const filterWalk = (node: unknown): void => {
     const local: WalkCtx = { ...ctx, refs: [] };
     walk(node, local);
     for (const ref of local.refs) {
       if (maskFor(policy, [ref]) !== undefined) {
-        throw new GuardError("masked_column_in_filter", `masked column "${ref}" cannot be used to filter, group or sort`);
+        throw new GuardError("masked_column_in_filter", `masked column "${ref}" cannot be used to filter, join, group or sort`);
       }
     }
   };
@@ -405,7 +575,7 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     if (isNode(node) && node.type === "ref" && node.table === undefined && typeof node.name === "string") {
       const name = node.name;
       const aliasIdx = outNames.indexOf(name);
-      const useAlias = kind === "order" ? aliasIdx >= 0 : aliasIdx >= 0 && !table.columnSet.has(name);
+      const useAlias = kind === "order" ? aliasIdx >= 0 : aliasIdx >= 0 && !anyAllows(name);
       if (useAlias) {
         if (masked.has(aliasIdx)) {
           throw new GuardError("masked_column_in_filter", `masked column "${name}" cannot be used to group or sort`);
@@ -416,6 +586,10 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     filterWalk(node);
   };
 
+  for (const s of sources) {
+    const on = (s.node.join as { on?: unknown } | undefined)?.on;
+    if (on !== undefined) filterWalk(on);
+  }
   if (stmt.where !== undefined) filterWalk(stmt.where);
   const groupBy = stmt.groupBy as unknown[] | undefined;
   if (groupBy !== undefined) {
@@ -436,8 +610,15 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     }
   }
 
-  // Row limit.
-  const maxRows = table.maxRows;
+  // Every declared view parameter must be used, so a view cannot silently ignore input.
+  if (opts.paramTypes) {
+    for (let i = 1; i <= opts.paramTypes.length; i += 1) {
+      if (!ctx.paramsSeen.has(i)) throw new GuardError("unsupported_syntax", `parameter $${i} is declared but not used`);
+    }
+  }
+
+  // Row limit: the smallest cap of any table read.
+  const maxRows = Math.min(...sources.map((s) => s.table.maxRows));
   const limitNode = stmt.limit as { limit?: ExprNode; offset?: ExprNode } | undefined;
   let requested: number | undefined;
   let offset: ExprNode | undefined;
@@ -470,13 +651,13 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     limitClamped = true;
   }
 
-  // Rewrite: expanded select list, schema-qualified table, predicate ANDed in, clamped limit.
+  // Rewrite: expanded select list, schema-qualified tables, predicates applied, clamped limit.
   const rewritten: ExprNode = { ...stmt };
   rewritten.columns = outCols;
-  const fromName = { ...(fromNode.name as ExprNode), schema: table.schema };
-  rewritten.from = [{ ...fromNode, name: fromName }];
-  if (table.requirePredicate) {
-    const pred = structuredClone(table.requirePredicate);
+  rewritten.from = sources.map((s) => rewriteSource(s, joinMode));
+  const only = sources[0] as Source;
+  if (!joinMode && only.table.requirePredicate) {
+    const pred = structuredClone(only.table.requirePredicate);
     rewritten.where = stmt.where === undefined ? pred : { type: "binary", op: "AND", left: stmt.where, right: pred };
   }
   rewritten.limit = { limit: { type: "integer", value: limit }, ...(offset ? { offset } : {}) };
@@ -494,5 +675,14 @@ export function guardQuery(sql: string, policy: Policy): GuardResult {
     throw new GuardError("rewrite_failed", "could not safely rewrite the query");
   }
 
-  return { sql: out, table, columns: outNames, masked, limit, limitClamped };
+  return {
+    sql: out,
+    table: only.table,
+    tables: sources.map((s) => s.table),
+    columns: outNames,
+    masked,
+    limit,
+    limitClamped,
+    paramCount: opts.paramTypes?.length ?? 0,
+  };
 }

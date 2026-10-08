@@ -6,6 +6,7 @@ import {
   handlePing,
   handlePolicyInfo,
   handleQuery,
+  handleRunView,
   type Runtime,
   type ToolOutcome,
 } from "./tools.js";
@@ -29,8 +30,10 @@ async function safely(fn: () => ToolOutcome | Promise<ToolOutcome>) {
   }
 }
 
+export const SERVER_VERSION = "0.2.0";
+
 export function createServer(rt: Runtime): McpServer {
-  const server = new McpServer({ name: "astraeus-postgres-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "astraeus-postgres-mcp", version: SERVER_VERSION });
 
   server.registerTool(
     "list_tables",
@@ -51,11 +54,26 @@ export function createServer(rt: Runtime): McpServer {
     "query",
     {
       description:
-        "Run one read-only SELECT against a single allowlisted table. No joins, subqueries or CTEs in v0. " +
-        "Row limits are enforced, masked columns are redacted, and every call is audited. Use list_tables first.",
+        "Run one read-only SELECT against allowlisted tables. INNER, LEFT, RIGHT and FULL JOIN ... ON across " +
+        "allowlisted tables in one schema are allowed; subqueries, CTEs and UNION are not. Row limits are enforced, " +
+        "masked columns are redacted, and every call is audited. Use list_tables first.",
       inputSchema: { sql: z.string().min(1).max(20_000) },
     },
     (args) => safely(() => handleQuery(rt, args)),
+  );
+
+  server.registerTool(
+    "run_view",
+    {
+      description:
+        "Run a named view defined in the policy: fixed, pre-approved SQL with typed parameters. " +
+        "list_tables shows the available views and their parameters. Same row limits, masking and audit as query.",
+      inputSchema: {
+        name: z.string().min(1).max(64),
+        params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+      },
+    },
+    (args) => safely(() => handleRunView(rt, args)),
   );
 
   server.registerTool(

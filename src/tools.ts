@@ -2,12 +2,16 @@ import { GuardError, guardQuery } from "./guard.js";
 import type { AuditSink } from "./audit.js";
 import type { Db } from "./db.js";
 import { maskRows } from "./mask.js";
-import type { CompiledTable, Policy } from "./policy.js";
+import { checkParamValue, type CompiledTable, type CompiledView, type Policy } from "./policy.js";
 
 export interface Runtime {
   policy: Policy;
   db: Db;
   audit: AuditSink;
+}
+
+function tableLabel(tables: CompiledTable[]): string {
+  return tables.map((t) => `${t.schema}.${t.name}`).join(",");
 }
 
 export type ToolOutcome =
@@ -51,7 +55,7 @@ export async function handleQuery(rt: Runtime, input: { sql: string }): Promise<
     throw err;
   }
 
-  const table = `${guarded.table.schema}.${guarded.table.name}`;
+  const table = tableLabel(guarded.tables);
   let result;
   try {
     result = await rt.db.runReadOnly(guarded.sql, rt.policy.statementTimeoutMs);
@@ -70,6 +74,7 @@ export async function handleQuery(rt: Runtime, input: { sql: string }): Promise<
     ok: true,
     data: {
       table,
+      tables: guarded.tables.map((t) => `${t.schema}.${t.name}`),
       columns,
       rows: rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i]]))),
       row_count: rows.length,
@@ -77,6 +82,92 @@ export async function handleQuery(rt: Runtime, input: { sql: string }): Promise<
       limit_clamped: guarded.limitClamped,
       may_have_more: guarded.limitClamped && rows.length >= guarded.limit,
       masked_columns: [...guarded.masked.keys()].map((i) => columns[i]),
+    },
+  };
+}
+
+function viewSummary(v: CompiledView) {
+  return {
+    name: v.name,
+    description: v.description ?? null,
+    params: v.params.map((p) => ({
+      name: p.name,
+      type: p.type,
+      required: p.default === undefined,
+      ...(p.description !== undefined ? { description: p.description } : {}),
+      ...(p.default !== undefined ? { default: p.default } : {}),
+    })),
+    columns: v.guarded.columns,
+    tables: v.guarded.tables.map((t) => `${t.schema}.${t.name}`),
+    max_rows: v.guarded.limit,
+  };
+}
+
+/** Run a named view from the policy. Its SQL was guarded at load; only typed parameter values vary. */
+export async function handleRunView(
+  rt: Runtime,
+  input: { name: string; params?: Record<string, unknown> | undefined },
+): Promise<ToolOutcome> {
+  const started = Date.now();
+  const elapsed = (): number => Date.now() - started;
+  const name = typeof input.name === "string" ? input.name : "";
+  const supplied = input.params ?? {};
+  const view = rt.policy.views.find((v) => v.name === name);
+  const paramNames = Object.keys(supplied).slice(0, 50);
+  if (!view) {
+    rt.audit.write({ tool: "run_view", decision: "deny", reason: "view_not_found", view: name.slice(0, 64), duration_ms: elapsed() });
+    return deny("view_not_found", `view "${name.slice(0, 64)}" is not in the policy`);
+  }
+  const problems: string[] = [];
+  for (const key of Object.keys(supplied)) {
+    if (!view.params.some((p) => p.name === key)) problems.push(`unknown parameter "${key.slice(0, 64)}"`);
+  }
+  const values: unknown[] = [];
+  for (const p of view.params) {
+    const value = Object.prototype.hasOwnProperty.call(supplied, p.name) ? supplied[p.name] : p.default;
+    if (value === undefined) {
+      problems.push(`parameter "${p.name}" is required`);
+      continue;
+    }
+    const err = checkParamValue(p.type, value);
+    if (err) problems.push(`parameter "${p.name}" ${err}`);
+    values.push(typeof value === "number" || typeof value === "boolean" ? String(value) : value);
+  }
+  const table = tableLabel(view.guarded.tables);
+  if (problems.length > 0) {
+    const message = problems.join("; ");
+    rt.audit.write({
+      tool: "run_view", decision: "deny", reason: `invalid_params: ${message}`, view: view.name, params: paramNames, table, duration_ms: elapsed(),
+    });
+    return deny("invalid_params", message);
+  }
+  let result;
+  try {
+    result = await rt.db.runReadOnly(view.guarded.sql, rt.policy.statementTimeoutMs, values);
+  } catch (err) {
+    const message = dbMessage(err);
+    rt.audit.write({
+      tool: "run_view", decision: "deny", reason: "db_error", view: view.name, params: paramNames, sql: view.source, table, duration_ms: elapsed(),
+    });
+    return deny("db_error", message);
+  }
+  const limited = result.rows.slice(0, view.guarded.limit);
+  const rows = maskRows(limited, view.guarded.masked);
+  const columns = dedupe(view.guarded.columns);
+  rt.audit.write({
+    tool: "run_view", decision: "allow", reason: "ok", view: view.name, params: paramNames, sql: view.source, table, row_count: rows.length, duration_ms: elapsed(),
+  });
+  return {
+    ok: true,
+    data: {
+      view: view.name,
+      tables: view.guarded.tables.map((t) => `${t.schema}.${t.name}`),
+      columns,
+      rows: rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i]]))),
+      row_count: rows.length,
+      row_limit: view.guarded.limit,
+      may_have_more: rows.length >= view.guarded.limit,
+      masked_columns: [...view.guarded.masked.keys()].map((i) => columns[i]),
     },
   };
 }
@@ -99,8 +190,9 @@ export function handleListTables(rt: Runtime): ToolOutcome {
     max_rows: t.maxRows,
     filtered: t.requirePredicateSource !== undefined,
   }));
+  const views = rt.policy.views.map(viewSummary);
   rt.audit.write({ tool: "list_tables", decision: "allow", reason: "ok", row_count: tables.length, duration_ms: Date.now() - started });
-  return { ok: true, data: { tables } };
+  return { ok: true, data: { tables, views } };
 }
 
 export async function handleDescribeTable(
@@ -151,12 +243,18 @@ export function handlePolicyInfo(rt: Runtime): ToolOutcome {
       version: p.version,
       policy_hash: p.hash,
       read_only: true,
-      single_table_select_only: true,
       defaults: {
         max_rows: p.maxRows,
         statement_timeout_ms: p.statementTimeoutMs,
         limit_mode: p.limitMode,
         require_limit: p.requireLimit,
+        max_join_tables: p.maxJoinTables,
+      },
+      joins: {
+        enabled: p.maxJoinTables > 1,
+        max_tables: p.maxJoinTables,
+        types: ["INNER", "LEFT", "RIGHT", "FULL"],
+        cross_schema: false,
       },
       schemas: p.schemas,
       tables: p.tables.map((t) => ({
@@ -167,6 +265,10 @@ export function handlePolicyInfo(rt: Runtime): ToolOutcome {
         require_predicate: t.requirePredicateSource ?? null,
       })),
       pii_mask: p.masks.map((m) => ({ column_regex: m.source, strategy: m.strategy })),
+      views: p.views.map((v) => ({ ...viewSummary(v), sql: v.source })),
+      audit_rotation: p.auditRotation
+        ? { max_bytes: p.auditRotation.maxBytes ?? null, daily: p.auditRotation.daily, keep: p.auditRotation.keep ?? null }
+        : null,
     },
   };
 }
