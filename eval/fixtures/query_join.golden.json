@@ -1,0 +1,52 @@
+{
+  "columns": [
+    "name",
+    "contact",
+    "total_cents",
+    "status"
+  ],
+  "limit_clamped": true,
+  "masked_columns": [
+    "contact"
+  ],
+  "may_have_more": true,
+  "row_count": 5,
+  "row_limit": 5,
+  "rows": [
+    {
+      "contact": "[REDACTED]",
+      "name": "Aoife Byrne",
+      "status": "paid",
+      "total_cents": 1200
+    },
+    {
+      "contact": "[REDACTED]",
+      "name": "Aoife Byrne",
+      "status": "paid",
+      "total_cents": 3400
+    },
+    {
+      "contact": "[REDACTED]",
+      "name": "Cathal Doyle",
+      "status": "open",
+      "total_cents": 990
+    },
+    {
+      "contact": "[REDACTED]",
+      "name": "Niamh Walsh",
+      "status": "paid",
+      "total_cents": 15000
+    },
+    {
+      "contact": "[REDACTED]",
+      "name": "Oisin Kelly",
+      "status": "refunded",
+      "total_cents": 450
+    }
+  ],
+  "table": "public.customers,public.orders",
+  "tables": [
+    "public.customers",
+    "public.orders"
+  ]
+}

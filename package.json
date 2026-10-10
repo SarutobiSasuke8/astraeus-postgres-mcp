@@ -12,7 +12,8 @@
     "start": "node dist/index.js",
     "smoke": "npm run build && node scripts/smoke.mjs",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "start:http": "node dist/http-main.js"
+    "start:http": "node dist/http-main.js",
+    "eval:contract": "npm run build && mcp-eval eval/mcp.suite.yaml"
   },
   "keywords": [
     "mcp",
@@ -33,6 +34,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@sarutobi-sasuke/mcp-eval-harness": "github:SarutobiSasuke8/mcp-eval-harness#077c74a60ccd6d9061e35f882ffd3db5f5d17052",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
     "embedded-postgres": "^18.4.0-beta.17",
