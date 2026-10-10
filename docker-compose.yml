@@ -1,3 +1,4 @@
+# Optional Docker alternative to the embedded Postgres used by `npm run smoke`.
 # Ephemeral Postgres for the smoke test only. Data lives in tmpfs and disappears on `down`.
 # Passwords come from your shell or a local .env file (see .env.example). Nothing is committed.
 services:
@@ -13,6 +14,8 @@ services:
       - /var/lib/postgresql/data
     volumes:
       - ./smoke/init.sh:/docker-entrypoint-initdb.d/10-init.sh:ro
+      # Not *.sql, so the image does not run it on its own before init.sh.
+      - ./smoke/seed.sql:/docker-entrypoint-initdb.d/seed.sql.in:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
       interval: 2s

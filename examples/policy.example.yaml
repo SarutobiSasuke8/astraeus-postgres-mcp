@@ -6,7 +6,7 @@ version: 1
 # The value is read from the environment only. Never put it in this file.
 connection_env: DATABASE_URL
 
-# v0 is read-only. This must be true.
+# Read-only. This must be true.
 readonly: true
 
 defaults:
@@ -14,6 +14,7 @@ defaults:
   statement_timeout_ms: 5000 # applied per query inside a READ ONLY transaction
   limit_mode: clamp          # clamp: lower an over-large LIMIT to max_rows. refuse: reject it.
   require_limit: false       # true: queries with no LIMIT are rejected instead of capped
+  max_join_tables: 4         # tables allowed in one JOIN query (same schema only). 1 switches joins off.
 
 allow:
   schemas: [public]
@@ -34,6 +35,27 @@ pii_mask:
     - column_regex: "(?i)email|phone|iban"
       strategy: redact       # redact | null | hash (hash is unsalted, so weak for low-entropy values)
 
+# Named views: fixed, pre-approved SQL with typed parameters, called with the run_view tool.
+# $1..$n map in order to params. Each view is checked by the same guard when the policy
+# loads (allowlists, predicates, masks, row cap); a view the guard would deny stops startup.
+# Parameter types: text, integer, numeric, boolean, date, timestamp.
+views:
+  - name: revenue_by_status
+    description: Order count and total by status since a date.
+    sql: >-
+      select status, count(*) as orders, sum(total_cents) as total_cents
+      from orders where created_at >= $1 group by status order by status
+    params:
+      - { name: since, type: date, description: "Inclusive start date (YYYY-MM-DD)" }
+  - name: customer_orders
+    description: Orders for one customer, with the contact number masked.
+    sql: >-
+      select c.name, c.billing_phone as contact, o.total_cents, o.status
+      from customers c join orders o on o.customer_id = c.id
+      where c.id = $1 order by o.id
+    params:
+      - { name: customer_id, type: integer }
+
 # Documentation of what the guard refuses. The guard enforces these unconditionally.
 deny_sql:
   - multi_statement
@@ -49,6 +71,10 @@ deny_sql:
   - grant
   - revoke
 
-# Optional. The ASTRAEUS_AUDIT_PATH environment variable overrides this.
+# Optional. The ASTRAEUS_AUDIT_PATH environment variable overrides path.
 audit:
   path: ./astraeus-audit.jsonl
+  rotate:
+    max_bytes: 10485760      # rotate before the live file passes 10 MiB (minimum 1024)
+    daily: true              # also rotate when the UTC date changes
+    keep: 30                 # keep the 30 newest rotated files; omit to keep all

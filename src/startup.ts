@@ -44,7 +44,7 @@ export function buildRuntime(opts: StartupOptions): Runtime {
   const auditPath = opts.env.ASTRAEUS_AUDIT_PATH ?? policy.auditPath ?? "astraeus-audit.jsonl";
   let audit;
   try {
-    audit = new JsonlAudit(auditPath, policy.hash);
+    audit = new JsonlAudit(auditPath, policy.hash, policy.auditRotation ? { rotation: policy.auditRotation } : {});
   } catch (err) {
     throw new StartupError(`audit log is not writable at ${auditPath}: ${(err as Error).message}`);
   }

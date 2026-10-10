@@ -1,19 +1,41 @@
-# Policy used by `npm run smoke`. Small row cap so the clamp is easy to see.
+# Policy used by `npm run smoke` and the integration suite. Small row cap so the clamp is easy to see.
 version: 1
 connection_env: DATABASE_URL
 readonly: true
 defaults:
   max_rows: 5
   statement_timeout_ms: 5000
+  max_join_tables: 3
 allow:
-  schemas: [public]
+  schemas: [public, internal]
   tables:
     - name: customers
       columns: [id, name, created_at, billing_phone]
       require_predicate: "deleted_at IS NULL"
     - name: orders
-      columns: [id, customer_id, total_cents, status]
+      columns: [id, customer_id, total_cents, status, created_at]
+      max_rows: 20
+    # Allowlisted, and readable by the role, so a refused cross-schema join proves the guard.
+    - name: staff_notes
+      schema: internal
+      columns: [id, customer_id, note]
 pii_mask:
   patterns:
     - column_regex: "(?i)email|phone|iban"
       strategy: redact
+views:
+  - name: revenue_by_status
+    description: Order count and total by status since a date.
+    sql: >-
+      select status, count(*) as orders, sum(total_cents) as total_cents
+      from orders where created_at >= $1 group by status order by status
+    params:
+      - { name: since, type: date, description: "Inclusive start date (YYYY-MM-DD)" }
+  - name: customer_orders
+    description: Orders for one customer with the customer's contact number (masked).
+    sql: >-
+      select c.name, c.billing_phone as contact, o.total_cents, o.status
+      from customers c join orders o on o.customer_id = c.id
+      where c.id = $1 order by o.id
+    params:
+      - { name: customer_id, type: integer }

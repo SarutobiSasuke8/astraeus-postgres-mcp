@@ -43,10 +43,9 @@ describe("guard: statement shape", () => {
     expect(codeOf(sql)).toBe("non_read_statement");
   });
 
-  it("rejects CTEs, unions, joins, subqueries and locking reads in v0", () => {
+  it("rejects CTEs, unions, comma joins, subqueries and locking reads", () => {
     expect(codeOf("with a as (select id from customers) select * from a")).toBe("cte_not_supported");
     expect(codeOf("select id from customers union select id from orders")).toBe("set_operation_not_supported");
-    expect(codeOf("select c.id from customers c join orders o on o.customer_id = c.id")).toBe("join_not_supported");
     expect(codeOf("select id from customers, orders")).toBe("join_not_supported");
     expect(codeOf("select id from (select id from customers) s")).toBe("subquery_not_supported");
     expect(codeOf("select (select count(*) from orders) from customers")).toBe("unsupported_syntax");

@@ -19,10 +19,10 @@ function text(result: unknown): string {
 }
 
 describe("MCP surface", () => {
-  it("exposes exactly the v0 tools", async () => {
+  it("exposes exactly the v1 tools", async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["describe_table", "list_tables", "ping", "policy_info", "query"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["describe_table", "list_tables", "ping", "policy_info", "query", "run_view"]);
   });
 
   it("returns query results and flags denials with isError", async () => {
