@@ -1,0 +1,31 @@
+{
+  "columns": [
+    {
+      "masked": false,
+      "name": "id",
+      "nullable": false,
+      "type": "integer"
+    },
+    {
+      "masked": false,
+      "name": "name",
+      "nullable": false,
+      "type": "text"
+    },
+    {
+      "masked": false,
+      "name": "created_at",
+      "nullable": false,
+      "type": "timestamp with time zone"
+    },
+    {
+      "masked": true,
+      "name": "billing_phone",
+      "nullable": true,
+      "type": "text"
+    }
+  ],
+  "max_rows": 5,
+  "require_predicate": "deleted_at IS NULL",
+  "table": "public.customers"
+}

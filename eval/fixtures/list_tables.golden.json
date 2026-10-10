@@ -1,0 +1,85 @@
+{
+  "tables": [
+    {
+      "columns": [
+        "id",
+        "name",
+        "created_at",
+        "billing_phone"
+      ],
+      "filtered": true,
+      "max_rows": 5,
+      "name": "customers",
+      "schema": "public"
+    },
+    {
+      "columns": [
+        "id",
+        "customer_id",
+        "total_cents",
+        "status",
+        "created_at"
+      ],
+      "filtered": false,
+      "max_rows": 20,
+      "name": "orders",
+      "schema": "public"
+    },
+    {
+      "columns": [
+        "id",
+        "customer_id",
+        "note"
+      ],
+      "filtered": false,
+      "max_rows": 5,
+      "name": "staff_notes",
+      "schema": "internal"
+    }
+  ],
+  "views": [
+    {
+      "columns": [
+        "status",
+        "orders",
+        "total_cents"
+      ],
+      "description": "Order count and total by status since a date.",
+      "max_rows": 20,
+      "name": "revenue_by_status",
+      "params": [
+        {
+          "description": "Inclusive start date (YYYY-MM-DD)",
+          "name": "since",
+          "required": true,
+          "type": "date"
+        }
+      ],
+      "tables": [
+        "public.orders"
+      ]
+    },
+    {
+      "columns": [
+        "name",
+        "contact",
+        "total_cents",
+        "status"
+      ],
+      "description": "Orders for one customer with the customer's contact number (masked).",
+      "max_rows": 5,
+      "name": "customer_orders",
+      "params": [
+        {
+          "name": "customer_id",
+          "required": true,
+          "type": "integer"
+        }
+      ],
+      "tables": [
+        "public.customers",
+        "public.orders"
+      ]
+    }
+  ]
+}

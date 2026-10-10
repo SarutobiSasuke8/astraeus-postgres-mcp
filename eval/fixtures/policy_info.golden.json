@@ -1,0 +1,118 @@
+{
+  "audit_rotation": null,
+  "defaults": {
+    "limit_mode": "clamp",
+    "max_join_tables": 3,
+    "max_rows": 5,
+    "require_limit": false,
+    "statement_timeout_ms": 5000
+  },
+  "joins": {
+    "cross_schema": false,
+    "enabled": true,
+    "max_tables": 3,
+    "types": [
+      "INNER",
+      "LEFT",
+      "RIGHT",
+      "FULL"
+    ]
+  },
+  "pii_mask": [
+    {
+      "column_regex": "(?i)email|phone|iban",
+      "strategy": "redact"
+    }
+  ],
+  "read_only": true,
+  "schemas": [
+    "public",
+    "internal"
+  ],
+  "tables": [
+    {
+      "columns": [
+        "id",
+        "name",
+        "created_at",
+        "billing_phone"
+      ],
+      "max_rows": 5,
+      "name": "customers",
+      "require_predicate": "deleted_at IS NULL",
+      "schema": "public"
+    },
+    {
+      "columns": [
+        "id",
+        "customer_id",
+        "total_cents",
+        "status",
+        "created_at"
+      ],
+      "max_rows": 20,
+      "name": "orders",
+      "require_predicate": null,
+      "schema": "public"
+    },
+    {
+      "columns": [
+        "id",
+        "customer_id",
+        "note"
+      ],
+      "max_rows": 5,
+      "name": "staff_notes",
+      "require_predicate": null,
+      "schema": "internal"
+    }
+  ],
+  "version": 1,
+  "views": [
+    {
+      "columns": [
+        "status",
+        "orders",
+        "total_cents"
+      ],
+      "description": "Order count and total by status since a date.",
+      "max_rows": 20,
+      "name": "revenue_by_status",
+      "params": [
+        {
+          "description": "Inclusive start date (YYYY-MM-DD)",
+          "name": "since",
+          "required": true,
+          "type": "date"
+        }
+      ],
+      "sql": "select status, count(*) as orders, sum(total_cents) as total_cents from orders where created_at >= $1 group by status order by status",
+      "tables": [
+        "public.orders"
+      ]
+    },
+    {
+      "columns": [
+        "name",
+        "contact",
+        "total_cents",
+        "status"
+      ],
+      "description": "Orders for one customer with the customer's contact number (masked).",
+      "max_rows": 5,
+      "name": "customer_orders",
+      "params": [
+        {
+          "name": "customer_id",
+          "required": true,
+          "type": "integer"
+        }
+      ],
+      "sql": "select c.name, c.billing_phone as contact, o.total_cents, o.status from customers c join orders o on o.customer_id = c.id where c.id = $1 order by o.id",
+      "tables": [
+        "public.customers",
+        "public.orders"
+      ]
+    }
+  ]
+}

@@ -279,6 +279,12 @@ docker compose down
 
 The seed is `smoke/seed.sql` and the policy is `smoke/policy.smoke.yaml`.
 
+## Contract suite (mcp-eval)
+
+`npm run eval:contract` builds the server and runs the [mcp-eval](https://github.com/SarutobiSasuke8/mcp-eval-harness) contract suite in `eval/mcp.suite.yaml`. The harness is a devDependency pinned to a commit SHA. The suite's stdio target is `scripts/eval-target.mjs`, which starts the same throwaway embedded PostgreSQL (seeded from `smoke/seed.sql`), runs `dist/index.js` with `smoke/policy.smoke.yaml`, and shuts the database down when the client disconnects. It needs no Docker, no network and no secrets.
+
+The suite checks the exact tool list, the advertised input schema of every tool (`eval/fixtures/*.input.schema.json`), goldens for `list_tables`, `policy_info`, `describe_table`, a masked join and a named view against the seeded data, and the deny paths (`column_not_allowed`, `multi_statement`, `non_read_statement`, `table_not_allowed`, `cross_schema_join`, `invalid_params`, `view_not_found`, unknown tool). It exits 0 on pass, 1 on a broken contract and 2 if the target cannot start. Golden updates (`npx mcp-eval eval/mcp.suite.yaml --update-goldens`) are reviewed code changes and never run in CI. `.github/workflows/mcp-eval.yml` runs the suite on pull requests.
+
 ## Development
 
 ```bash
@@ -288,6 +294,7 @@ npm run typecheck
 npm test                   # unit tests, no database
 npm run test:integration   # real embedded PostgreSQL, no Docker
 npm run build
+npm run eval:contract      # mcp-eval contract suite, real embedded PostgreSQL
 ```
 
 Unit tests mock the `pg` layer (`Db` interface in `src/db.ts`), so they run without a database. They cover statement and join shapes, allowlist and mask deny paths, row caps, named-view validation and binding, audit on allow and deny, audit rotation, fail-closed stdio and HTTP startup, the HTTP auth and host checks, and MCP round trips in memory and over HTTP. The integration suite (`tests/integration`) runs the real stack and the guard-bypassing role checks against a real PostgreSQL.
@@ -307,6 +314,8 @@ src/index.ts         stdio entrypoint
 src/http.ts          Streamable HTTP transport, auth, health
 src/http-main.ts     HTTP entrypoint
 scripts/embedded-pg.mjs  throwaway embedded PostgreSQL for smoke and integration tests
+scripts/eval-target.mjs  stdio target for the contract suite (embedded PostgreSQL plus dist/index.js)
+eval/                contract suite and fixtures
 ```
 
 ## Limits and honest caveats
