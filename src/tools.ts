@@ -34,6 +34,10 @@ function dedupe(names: string[]): string[] {
 function dbMessage(err: unknown): string {
   const e = err as { code?: unknown; message?: unknown };
   const code = typeof e.code === "string" ? e.code : "unknown";
+  // Only a PostgreSQL SQLSTATE (five characters) carries a server message worth showing.
+  // Socket and DNS errors (ECONNREFUSED, ENOTFOUND, ETIMEDOUT, ...) and driver errors with no
+  // code put the host and port in their message, so they get a fixed text instead.
+  if (!/^(?:[0-9][0-9A-Z]|F0|HV|P0|XX)[0-9A-Z]{3}$/u.test(code)) return `database error (${code}): could not reach the database`;
   // pg errors can echo connection details, so keep only the code and a trimmed message.
   const message = typeof e.message === "string" ? e.message.replace(/postgres(ql)?:\/\/\S+/gi, "[dsn]").slice(0, 200) : "";
   return `database error (${code}): ${message}`;

@@ -279,6 +279,19 @@ docker compose down
 
 The seed is `smoke/seed.sql` and the policy is `smoke/policy.smoke.yaml`.
 
+### Safety suite and prompt-injection fixtures
+
+`tests/integration/safety.test.ts` checks the read-only and output claims against a real database:
+
+- writes, DDL, privilege changes, session and transaction control, multi-statement tricks (comments, string literals, `BEGIN`/`COMMIT` chains), `COPY` in every direction and function-based writes (a plpgsql function that inserts, `nextval`, `setval`, `set_config`, `lo_import`, `pg_read_file` and more) are refused by the guard, logged as denies, and leave the database unchanged;
+- with the guard bypassed, `PgDb.runReadOnly` on a **superuser** connection still refuses DML, DDL, sequence and function writes (`25006`) and multi-statement strings (`42601`). For the agent role it also refuses `COPY` to or from files and programs;
+- row caps hold for every way of asking for more rows (no limit, `LIMIT 1000`, `FETCH FIRST`, `OFFSET`, a cartesian join), and a slow join is cancelled at the policy `statement_timeout_ms`. The database layer applies the timeout too, and the role has its own `statement_timeout` as a backstop;
+- no tool output contains the DSN, either password, or the host and port, on a healthy server, after a failed login, or when the database is unreachable.
+
+`tests/integration/prompt-injection.test.ts` stores the fixtures in `tests/integration/fixtures/prompt-injection.ts` in a real table. The fixtures are hostile text such as instruction overrides, fake tool markup, JSON break-outs, stacked SQL, exfiltration requests, mask bait, image beacons, terminal escape codes, fake policy text and an oversized payload. The suite then reads them back through the server. The server never interprets result data, so the expected safe behaviour is: every payload comes back byte for byte as a JSON string value; the response keeps its own structure (no forged keys); masks and row caps still apply; control characters are escaped; the policy hash does not change; the audit log holds no row data; and if a model is tricked into sending the planted SQL, the guard refuses it. Whether a model obeys planted text is the client's concern. This suite proves that the server adds no path from data to action.
+
+Locally the integration suite uses the embedded server. In CI (`.github/workflows/ci.yml`, job `integration`) it runs against a disposable Postgres service container (PostgreSQL 16 and 17). To use any other disposable server, set `APM_TEST_PG_ADMIN_URL` to a superuser URL for an **empty** database named `appdb`. The suite seeds it, creates the `astraeus_agent` role and refuses to run if that role already exists. This variable is read only by the test harness (`scripts/external-pg.mjs`), never by the server.
+
 ## Contract suite (mcp-eval)
 
 `npm run eval:contract` builds the server and runs the [mcp-eval](https://github.com/SarutobiSasuke8/mcp-eval-harness) contract suite in `eval/mcp.suite.yaml`. The harness is a devDependency pinned to a commit SHA. The suite's stdio target is `scripts/eval-target.mjs`, which starts the same throwaway embedded PostgreSQL (seeded from `smoke/seed.sql`), runs `dist/index.js` with `smoke/policy.smoke.yaml`, and shuts the database down when the client disconnects. It needs no Docker, no network and no secrets.
@@ -314,6 +327,7 @@ src/index.ts         stdio entrypoint
 src/http.ts          Streamable HTTP transport, auth, health
 src/http-main.ts     HTTP entrypoint
 scripts/embedded-pg.mjs  throwaway embedded PostgreSQL for smoke and integration tests
+scripts/external-pg.mjs  seeds an external disposable PostgreSQL (CI service container) for the integration suite
 scripts/eval-target.mjs  stdio target for the contract suite (embedded PostgreSQL plus dist/index.js)
 eval/                contract suite and fixtures
 ```

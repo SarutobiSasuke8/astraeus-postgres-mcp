@@ -73,6 +73,26 @@ describe("query: execution", () => {
       expect(bad.message).not.toContain("pw@host");
     }
   });
+
+  it("does not echo host or port from socket and DNS errors", async () => {
+    const { rt, db } = makeRuntime();
+    for (const [code, message] of [
+      ["ECONNREFUSED", "connect ECONNREFUSED 10.1.2.3:6543"],
+      ["ENOTFOUND", "getaddrinfo ENOTFOUND db.internal.example"],
+      ["EPIPE", "write EPIPE 10.1.2.3:6543"],
+      [undefined, "Connection terminated due to connection timeout to db.internal.example:6543"],
+    ] as const) {
+      db.failWith = Object.assign(new Error(message), code ? { code } : {});
+      const out = await handleQuery(rt, { sql: "select id from customers" });
+      expect(out).toMatchObject({ ok: false, code: "db_error" });
+      if (!out.ok) {
+        expect(out.message).not.toContain("10.1.2.3");
+        expect(out.message).not.toContain("6543");
+        expect(out.message).not.toContain("db.internal.example");
+        expect(out.message).toContain("could not reach the database");
+      }
+    }
+  });
 });
 
 describe("query: PII mask", () => {

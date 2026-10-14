@@ -22,3 +22,36 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # Real-database suite (tests/integration): database claims, the safety suite and the
+  # prompt-injection fixtures, against a disposable Postgres service container that is
+  # thrown away with the job. The password is a per-run throwaway, not a secret.
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16-alpine", "17-alpine"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_DB: appdb
+          POSTGRES_PASSWORD: ci-throwaway-${{ github.run_id }}-${{ github.run_attempt }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d appdb"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      APM_TEST_PG_ADMIN_URL: postgresql://postgres:ci-throwaway-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/appdb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration
