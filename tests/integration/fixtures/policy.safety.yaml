@@ -1,0 +1,30 @@
+# Policy for the safety and prompt-injection suites (tests/integration/safety.test.ts and
+# prompt-injection.test.ts). The tables numbers and support_tickets are created by those
+# suites with the admin connection and dropped again afterwards.
+version: 1
+connection_env: DATABASE_URL
+readonly: true
+defaults:
+  max_rows: 5
+  # Low enough that a deliberately slow join is cancelled quickly, high enough for normal reads.
+  statement_timeout_ms: 1000
+  max_join_tables: 3
+allow:
+  schemas: [public]
+  tables:
+    - name: customers
+      columns: [id, name, created_at, billing_phone]
+      require_predicate: "deleted_at IS NULL"
+    - name: orders
+      columns: [id, customer_id, total_cents, status, created_at]
+      max_rows: 20
+    - name: numbers
+      columns: [n]
+      max_rows: 10
+    - name: support_tickets
+      columns: [id, subject, body, reporter_email]
+      max_rows: 50
+pii_mask:
+  patterns:
+    - column_regex: "(?i)email|phone|iban"
+      strategy: redact

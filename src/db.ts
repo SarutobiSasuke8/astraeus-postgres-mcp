@@ -42,8 +42,12 @@ export class PgDb implements Db {
     try {
       await client.query("BEGIN READ ONLY");
       await client.query(`SET LOCAL statement_timeout = ${timeout}`);
-      // rowMode "array" also forces the extended protocol, which rejects multiple statements.
-      const res = await client.query({ text: sql, values: params, rowMode: "array" });
+      // queryMode "extended" forces the extended protocol even with no parameters, so the
+      // server rejects a string holding more than one statement (42601). rowMode alone does
+      // not: without values, pg falls back to the simple protocol, which runs every statement.
+      // @types/pg does not declare queryMode yet, though pg itself reads it (lib/query.js).
+      const config: pg.QueryArrayConfig & { queryMode: "extended" } = { text: sql, values: params, rowMode: "array", queryMode: "extended" };
+      const res = await client.query(config);
       return { fields: res.fields.map((f) => f.name), rows: res.rows as unknown[][] };
     } finally {
       try {
